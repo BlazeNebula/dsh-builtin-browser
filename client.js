@@ -1195,7 +1195,12 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       const quiet = overrideOf(name).quiet
       return quiet === undefined ? "" : quiet ? "on" : "off"
     }
-    const profilesSection = section("profiles.title", [
+    // Collapsed like 高级设置: this is a tuning table, not something to read on every visit.
+    // The two controls sit in ONE group on the right — three flex children would let the row's
+    // `space-between` park the first dropdown in the middle of the row, at a different x per
+    // profile because the labels differ in width.
+    const profilesSection = h("details", { key: "profiles", style: styles.group }, [
+      h("summary", { key: "title", style: styles.groupTitle }, t("profiles.title")),
       h("p", { key: "hint", style: styles.hint }, t("profiles.hint").replace("{profile}", meta.profile === "" ? "-" : meta.profile)),
       profileNames.length === 0
         ? h("p", { key: "empty", style: styles.hint }, t("profiles.empty"))
@@ -1204,30 +1209,32 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
           className: "dsh-bb-row",
           style: styles.row,
         }, [
-          h("span", { key: "text", style: styles.label }, [
+          h("span", { key: "text", style: { ...styles.label, flex: "1 1 auto", minWidth: 0 } }, [
             h("span", { key: "label" }, name),
             name === meta.profile ? h("span", { key: "current", style: styles.hint }, t("profiles.current")) : null,
           ]),
-          h(Dropdown, {
-            key: "carrier",
-            label: `${name} — ${t("browser.channel")}`,
-            value: overrideOf(name).channel ?? "",
-            options: [{ value: "", label: t("profiles.inherit") }, ...options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"])],
-            disabled: busy,
-            onChange: value => patchProfile(name, { channel: value === "" ? null : value }),
-          }),
-          h(Dropdown, {
-            key: "quiet",
-            label: `${name} — ${t("ui.quiet")}`,
-            value: quietValue(name),
-            options: [
-              { value: "", label: t("profiles.quiet.inherit") },
-              { value: "on", label: t("profiles.quiet.on") },
-              { value: "off", label: t("profiles.quiet.off") },
-            ],
-            disabled: busy,
-            onChange: value => patchProfile(name, { quiet: value === "" ? null : value === "on" }),
-          }),
+          h("div", { key: "controls", style: { display: "flex", gap: "8px", flex: "0 0 auto" } }, [
+            h(Dropdown, {
+              key: "carrier",
+              label: `${name} — ${t("browser.channel")}`,
+              value: overrideOf(name).channel ?? "",
+              options: [{ value: "", label: t("profiles.inherit") }, ...options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"])],
+              disabled: busy,
+              onChange: value => patchProfile(name, { channel: value === "" ? null : value }),
+            }),
+            h(Dropdown, {
+              key: "quiet",
+              label: `${name} — ${t("ui.quiet")}`,
+              value: quietValue(name),
+              options: [
+                { value: "", label: t("profiles.quiet.inherit") },
+                { value: "on", label: t("profiles.quiet.on") },
+                { value: "off", label: t("profiles.quiet.off") },
+              ],
+              disabled: busy,
+              onChange: value => patchProfile(name, { quiet: value === "" ? null : value === "on" }),
+            }),
+          ]),
         ]))),
     ])
 
