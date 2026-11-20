@@ -54,7 +54,7 @@ test('a display-less host gets headless, a display gets a window', async () => {
   // The setting exists in the manifest, defaults to auto, and `auto` is resolved from the
   // environment rather than guessed.
   assert.match(settingsStore, /readonly headless: HeadlessMode/, 'the setting is declared')
-  assert.match(settingsStore, /browser: \{ channel: 'bundled', headless: 'auto' \}/, 'and defaults to auto')
+  assert.match(settingsStore, /browser: \{ channel: 'bundled', headless: 'auto', profiles: \{\} \}/, 'and defaults to auto')
   assert.match(settingsStore, /export type HeadlessMode = 'auto' \| 'headless' \| 'windowed'/,
     'three modes, not a boolean — a JSON document mixing strings and booleans is ambiguous')
   // Booleans are still accepted, because "headless: true" is what a person writes first.

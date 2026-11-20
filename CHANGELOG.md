@@ -4,6 +4,16 @@
 
 ## 未发布
 
+### 载体可按 profile 分开（fork 改动）
+
+同一 `DSH_HOME` 下多个 profile 共用一份 `settings.json`，全局的 `browser.channel` 会让桌面端与 `dsh web` 互相覆盖：桌面端要 DSH 侧栏，`web` 端要自己的浏览器跑后台任务，两者无法并存。
+
+- 新增 `browser.profiles.<profile>`，可写 `channel`、`headless`、`quiet`；未写的字段跟随全局值，空条目丢弃，写错的字段告警后忽略。
+- 生效点在 `SettingsStore.get()`：覆盖在读取处折叠，载体选择与 provider 不需要知道 profile。
+- 面板新增「按 profile 分配载体」表格，列出 `$DSH_HOME/profiles` 下的 profile 及已有覆盖项。
+- 有 profile 的宿主上，面板改「默认浏览器」「窗口模式」「安静模式」写入当前 profile 的覆盖项，不再改全局值；`null` 表示清除该覆盖项。
+- 设置路由的 `GET` 响应新增 `profile` 与 `profiles` 字段。
+
 ### 桌面端探测补上注册表与平台约定位置
 
 `findDesktopInstall` 与安装器的默认探测已改为多根扫描，但仍有两个真实安装看不见：

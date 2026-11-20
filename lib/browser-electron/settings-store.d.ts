@@ -20,6 +20,27 @@ export type VisionStrategy = 'auto' | 'nonVisual';
 export type HeadlessMode = 'auto' | 'headless' | 'windowed';
 /** Every value {@link HeadlessMode} accepts, for validation and the settings UI. */
 export declare const HEADLESS_MODES: readonly ["auto", "headless", "windowed"];
+/**
+ * One profile's override of the carrier-facing switches.
+ *
+ * Several profiles can share one `$DSH_HOME`, and they do not want the same carrier: the desktop
+ * profile drives the shell's sidebar, where a human watches the page, while a `web` profile that
+ * runs background tasks wants its own browser that never touches that sidebar. A single
+ * `browser.channel` made the two fight over one value — the settings file is shared, and the
+ * host re-reads it on every stat — so the value that describes "which browser carries the agent's
+ * pages" is now nameable per profile.
+ *
+ * Every field is optional: absent means "follow the document's global value", which keeps a
+ * document written before this existed behaving exactly as before.
+ */
+export interface ProfileSettings {
+    /** Carrier for this profile; absent follows `browser.channel`. */
+    readonly channel?: BrowserChannel;
+    /** Window mode for this profile; absent follows `browser.headless`. */
+    readonly headless?: HeadlessMode;
+    /** Quiet mode for this profile; absent follows `ui.quiet`. */
+    readonly quiet?: boolean;
+}
 /** The full settings document, with every field resolved. */
 export interface BrowserSettings {
     /** Persistent browsing history (visited pages). */
@@ -82,6 +103,13 @@ export interface BrowserSettings {
          * immediately after launch".
          */
         readonly headless: HeadlessMode;
+        /**
+         * Per-profile overrides, keyed by the profile name DSH booted (`desktop`, `web`, …).
+         *
+         * Read through {@link applyProfileSettings}; the effective value is what the carrier choice
+         * and the provider see, so nothing downstream needs to know a profile exists.
+         */
+        readonly profiles: Readonly<Record<string, ProfileSettings>>;
     };
     /** Whether the agent may read cookies / export login state. */
     readonly credentials: {
@@ -161,6 +189,16 @@ export declare function settingsPath(): string;
  */
 export declare const BROWSER_CHANNELS: readonly ["chrome", "edge", "auto", "bundled", "sidebar"];
 /**
+ * The document as this profile sees it.
+ *
+ * Applying the override at the read seam is what keeps the rest of the plugin profile-agnostic:
+ * the carrier choice, the quiet checks and the settings panel all keep calling `settings.get()`.
+ * @param settings - the document as stored.
+ * @param profile - the booted profile name, or undefined when the surface has none.
+ * @returns the same document, with this profile's overrides folded in.
+ */
+export declare function applyProfileSettings(settings: BrowserSettings, profile: string | undefined): BrowserSettings;
+/**
  * Resolve a raw settings document (already parsed, shape unknown) into the full
  * document, field by field. Unknown keys are dropped: the file is not a place to
  * smuggle configuration.
@@ -177,26 +215,54 @@ export declare function resolveSettings(raw: unknown, warn?: (message: string) =
 export declare class SettingsStore {
     private readonly file;
     private readonly log?;
+    private readonly profile?;
     private cached;
     /** Last observed mtime, used to invalidate the cache on external edits. */
     private cachedMtimeMs;
     /**
      * @param file - settings file path (defaults beside the browser profile).
+     * @param log - where a discarded value is reported.
+     * @param profile - the booted profile name; its overrides are folded into {@link get}.
      */
-    constructor(file?: string, log?: ((message: string) => void) | undefined);
+    constructor(file?: string, log?: ((message: string) => void) | undefined, profile?: string | undefined);
     /** Path this store reads and writes. */
     path(): string;
+    /** The profile whose overrides {@link get} folds in, if this surface has one. */
+    profileName(): string | undefined;
     /**
-     * Current settings, re-read when the file changed on disk.
-     * @returns the resolved settings document.
+     * Current settings, re-read when the file changed on disk, with this profile's overrides applied.
+     * @returns the effective settings document.
      */
     get(): BrowserSettings;
     /**
+     * The document exactly as stored, before any profile override.
+     *
+     * `update` merges patches into THIS, never into {@link get}: writing the effective values back
+     * would bake one profile's override into the global default and hand it to every other profile.
+     * @returns the resolved document as stored.
+     */
+    private stored;
+    /**
      * Merge a partial patch into the stored document and persist it.
+     *
+     * On a surface that knows its profile, a patch that names the carrier (`browser.channel`,
+     * `browser.headless`) or quiet mode (`ui.quiet`) is written to THAT profile's override instead
+     * of the global value. That is what makes the existing controls in the panel mean "how this
+     * profile runs" without a second set of controls, and it is why the panel's writes stop
+     * fighting the other profile's preferences.
      * @param patch - the fields to change (unknown keys are ignored).
-     * @returns the settings after the merge.
+     * @returns the effective settings after the merge.
      */
     update(patch: unknown): BrowserSettings;
+    /**
+     * Move this profile's carrier-facing fields from a top-level patch into its override entry.
+     *
+     * Left alone when the surface has no profile: an unnamed surface keeps the global behaviour, so
+     * a hand-written patch (`{ browser: { channel } }`) still writes what it says.
+     * @param patch - the requested patch.
+     * @returns the patch to store.
+     */
+    private routeToProfile;
 }
 /**
  * Replace a file's contents atomically: write a sibling temporary file, then rename it over

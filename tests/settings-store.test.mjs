@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { DEFAULT_SETTINGS, SettingsStore, resolveSettings } from '../lib/browser-electron/settings-store.js'
+import { DEFAULT_SETTINGS, SettingsStore, applyProfileSettings, resolveSettings } from '../lib/browser-electron/settings-store.js'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
 
 /** A unique settings file per test. */
@@ -172,4 +172,88 @@ test('a settings file written with a UTF-8 BOM is still honoured', () => {
   assert.equal(settings.ui.autoExpandOnce, false, 'so did the switches')
   assert.equal(settings.ui.virtualCursor, false)
   assert.equal(settings.history.enabled, DEFAULT_SETTINGS.history.enabled, 'unspecified fields keep defaults')
+})
+
+// Per-profile carrier overrides: profiles sharing one $DSH_HOME want different carriers, and a
+// single global `browser.channel` made them overwrite each other (the file is shared and every
+// host re-reads it on a stat), so the value is nameable per booted profile.
+test('per-profile overrides parse, validate and fall back to the global value', () => {
+  const warnings = []
+  const resolved = resolveSettings({
+    browser: {
+      channel: 'sidebar',
+      headless: 'windowed',
+      profiles: {
+        web: { channel: 'edge', headless: 'headless', quiet: true },
+        desktop: { channel: 'sidebar' },
+        broken: { channel: 'netscape', quiet: 'yes' },
+        empty: {},
+        notAnObject: 7,
+      },
+    },
+  }, message => warnings.push(message))
+  assert.deepEqual(resolved.browser.profiles.web, { channel: 'edge', headless: 'headless', quiet: true })
+  assert.deepEqual(resolved.browser.profiles.desktop, { channel: 'sidebar' }, 'a partial entry keeps only what it set')
+  assert.equal('broken' in resolved.browser.profiles, false, 'nothing usable means no override at all')
+  assert.equal('empty' in resolved.browser.profiles, false)
+  assert.equal('notAnObject' in resolved.browser.profiles, false)
+  assert.equal(resolved.browser.channel, 'sidebar', 'the global value is untouched by an override')
+  assert.equal(warnings.length, 2, 'the mistyped channel and the mistyped quiet are both reported')
+})
+
+test('an override only changes what it names, and only for its own profile', () => {
+  const raw = { browser: { channel: 'sidebar', headless: 'windowed', profiles: { web: { channel: 'edge' } } } }
+  const resolved = resolveSettings(raw)
+  const web = applyProfileSettings(resolved, 'web')
+  assert.equal(web.browser.channel, 'edge', 'the override wins for its profile')
+  assert.equal(web.browser.headless, 'windowed', 'unmentioned fields follow the global value')
+  assert.equal(web.ui.quiet, resolved.ui.quiet, 'and so does quiet mode')
+  const desktop = applyProfileSettings(resolved, 'desktop')
+  assert.equal(desktop, resolved, 'a profile without an override gets the document itself')
+  assert.equal(applyProfileSettings(resolved, undefined), resolved, 'a surface without a profile is unchanged')
+})
+
+test('a profile-bound store writes its carrier choice into its own override', () => {
+  const file = settingsFile()
+  const store = new SettingsStore(file, undefined, 'web')
+  const updated = store.update({ browser: { channel: 'edge' }, ui: { quiet: true } })
+  assert.equal(updated.browser.channel, 'edge', 'the caller sees the effective value')
+  assert.equal(updated.ui.quiet, true)
+
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(onDisk.browser.channel, DEFAULT_SETTINGS.browser.channel, 'the global default is not overwritten')
+  assert.deepEqual(onDisk.browser.profiles.web, { channel: 'edge', quiet: true }, 'the profile carries the choice')
+  assert.equal(onDisk.ui.quiet, DEFAULT_SETTINGS.ui.quiet, 'quiet mode moved into the override too')
+
+  // A second profile, edited from elsewhere, must not be erased by the first one's next write.
+  new SettingsStore(file).update({ browser: { profiles: { desktop: { channel: 'sidebar' } } } })
+  new SettingsStore(file, undefined, 'web').update({ browser: { channel: 'chrome' } })
+  const profiles = JSON.parse(readFileSync(file, 'utf8')).browser.profiles
+  assert.equal(profiles.desktop.channel, 'sidebar', 'another profile keeps its own override')
+  assert.equal(profiles.web.channel, 'chrome', 'and this one is updated in place')
+  assert.equal(new SettingsStore(file, undefined, 'web').get().browser.channel, 'chrome')
+  assert.equal(new SettingsStore(file, undefined, 'desktop').get().browser.channel, 'sidebar')
+})
+
+// A profile that stops overriding must go back to following the document, and the way the panel
+// says that is `null`: storing the null would make the field unreadable and warn on every read.
+test('a null field clears the override instead of storing an unreadable value', () => {
+  const file = settingsFile()
+  const store = new SettingsStore(file, undefined, 'web')
+  store.update({ browser: { channel: 'edge' } })
+  assert.equal(store.get().browser.channel, 'edge')
+
+  store.update({ browser: { profiles: { web: { channel: null } } } })
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal('web' in onDisk.browser.profiles, false, 'the emptied entry is removed, not left as {}')
+  assert.equal(store.get().browser.channel, DEFAULT_SETTINGS.browser.channel, 'and the global value applies again')
+})
+
+test('a store without a profile keeps writing the global value', () => {
+  const file = settingsFile()
+  const store = new SettingsStore(file)
+  store.update({ browser: { channel: 'edge' } })
+  const onDisk = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(onDisk.browser.channel, 'edge', 'an unnamed surface is unchanged by this feature')
+  assert.deepEqual(onDisk.browser.profiles, {}, 'and records no override')
 })

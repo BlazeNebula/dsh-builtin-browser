@@ -28,6 +28,28 @@ export type HeadlessMode = 'auto' | 'headless' | 'windowed'
 /** Every value {@link HeadlessMode} accepts, for validation and the settings UI. */
 export const HEADLESS_MODES = ['auto', 'headless', 'windowed'] as const
 
+/**
+ * One profile's override of the carrier-facing switches.
+ *
+ * Several profiles can share one `$DSH_HOME`, and they do not want the same carrier: the desktop
+ * profile drives the shell's sidebar, where a human watches the page, while a `web` profile that
+ * runs background tasks wants its own browser that never touches that sidebar. A single
+ * `browser.channel` made the two fight over one value — the settings file is shared, and the
+ * host re-reads it on every stat — so the value that describes "which browser carries the agent's
+ * pages" is now nameable per profile.
+ *
+ * Every field is optional: absent means "follow the document's global value", which keeps a
+ * document written before this existed behaving exactly as before.
+ */
+export interface ProfileSettings {
+  /** Carrier for this profile; absent follows `browser.channel`. */
+  readonly channel?: BrowserChannel
+  /** Window mode for this profile; absent follows `browser.headless`. */
+  readonly headless?: HeadlessMode
+  /** Quiet mode for this profile; absent follows `ui.quiet`. */
+  readonly quiet?: boolean
+}
+
 /** The full settings document, with every field resolved. */
 export interface BrowserSettings {
   /** Persistent browsing history (visited pages). */
@@ -90,6 +112,13 @@ export interface BrowserSettings {
      * immediately after launch".
      */
     readonly headless: HeadlessMode
+    /**
+     * Per-profile overrides, keyed by the profile name DSH booted (`desktop`, `web`, …).
+     *
+     * Read through {@link applyProfileSettings}; the effective value is what the carrier choice
+     * and the provider see, so nothing downstream needs to know a profile exists.
+     */
+    readonly profiles: Readonly<Record<string, ProfileSettings>>
   }
   /** Whether the agent may read cookies / export login state. */
   readonly credentials: {
@@ -163,7 +192,7 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   // Bundled by default: it needs nothing installed, and on the desktop the carrier
   // is the sidebar anyway. Choosing a system browser is an explicit opt-in because
   // it starts a real Chrome/Edge with its own profile.
-  browser: { channel: 'bundled', headless: 'auto' },
+  browser: { channel: 'bundled', headless: 'auto', profiles: {} },
   credentials: { allowRead: true },
   // Off unless the host turns it on. A frame can show a CAPTCHA, an account name, or logged-in
   // content, so watching is an explicit decision rather than something a remote client can arrange.
@@ -280,6 +309,96 @@ function resolveChannel(value: unknown, warn?: (message: string) => void): Brows
   return DEFAULT_SETTINGS.browser.channel
 }
 
+/**
+ * One override value, validated WITHOUT a fallback.
+ *
+ * A typo in an override must drop the field, not pick a default: defaulting would silently pin
+ * the profile to `bundled` instead of letting it follow the document's global value, which is the
+ * opposite of what "I did not set this here" means.
+ */
+function overrideChannel(value: unknown, profile: string, warn?: (message: string) => void): BrowserChannel | undefined {
+  if ((BROWSER_CHANNELS as readonly unknown[]).includes(value)) return value as BrowserChannel
+  warn?.(
+    `dsh-builtin-browser: browser.profiles.${profile}.channel ${JSON.stringify(value)} is not a known `
+    + `channel, so this profile follows browser.channel instead. Expected one of: ${BROWSER_CHANNELS.join(', ')}.`,
+  )
+  return undefined
+}
+
+/** Headless override; booleans are accepted here for the same reason as {@link resolveHeadless}. */
+function overrideHeadless(value: unknown, profile: string, warn?: (message: string) => void): HeadlessMode | undefined {
+  if (value === true) return 'headless'
+  if (value === false) return 'windowed'
+  if (typeof value === 'string' && (HEADLESS_MODES as readonly string[]).includes(value)) return value as HeadlessMode
+  warn?.(
+    `dsh-builtin-browser: browser.profiles.${profile}.headless ${JSON.stringify(value)} is not a known `
+    + `mode, so this profile follows browser.headless instead. Expected one of: ${HEADLESS_MODES.join(', ')} (or a boolean).`,
+  )
+  return undefined
+}
+
+/**
+ * Resolve the per-profile overrides.
+ *
+ * An entry with nothing usable in it is dropped rather than kept as `{}`: an empty override and no
+ * override behave the same, and dropping keeps the settings file honest about what is actually set.
+ * @param value - the raw `browser.profiles` value.
+ * @param warn - where to report discarded values.
+ * @returns the overrides, keyed by profile name.
+ */
+function resolveProfiles(value: unknown, warn?: (message: string) => void): Record<string, ProfileSettings> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out: Record<string, ProfileSettings> = {}
+  for (const [rawName, rawEntry] of Object.entries(value as Record<string, unknown>)) {
+    const name = rawName.trim()
+    if (name === '') continue
+    if (rawEntry === null || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) continue
+    const entry = rawEntry as Record<string, unknown>
+    const channel = entry.channel === undefined ? undefined : overrideChannel(entry.channel, name, warn)
+    const headless = entry.headless === undefined ? undefined : overrideHeadless(entry.headless, name, warn)
+    const quiet = typeof entry.quiet === 'boolean' ? entry.quiet : undefined
+    if (entry.quiet !== undefined && quiet === undefined) {
+      warn?.(
+        `dsh-builtin-browser: browser.profiles.${name}.quiet ${JSON.stringify(entry.quiet)} is not a `
+        + 'boolean, so this profile follows ui.quiet instead.',
+      )
+    }
+    if (channel === undefined && headless === undefined && quiet === undefined) continue
+    out[name] = {
+      ...channel === undefined ? {} : { channel },
+      ...headless === undefined ? {} : { headless },
+      ...quiet === undefined ? {} : { quiet },
+    }
+  }
+  return out
+}
+
+/**
+ * The document as this profile sees it.
+ *
+ * Applying the override at the read seam is what keeps the rest of the plugin profile-agnostic:
+ * the carrier choice, the quiet checks and the settings panel all keep calling `settings.get()`.
+ * @param settings - the document as stored.
+ * @param profile - the booted profile name, or undefined when the surface has none.
+ * @returns the same document, with this profile's overrides folded in.
+ */
+export function applyProfileSettings(settings: BrowserSettings, profile: string | undefined): BrowserSettings {
+  if (profile === undefined || profile === '') return settings
+  const override = settings.browser.profiles[profile]
+  if (override === undefined) return settings
+  const channel = override.channel ?? settings.browser.channel
+  const headless = override.headless ?? settings.browser.headless
+  const quiet = override.quiet ?? settings.ui.quiet
+  if (channel === settings.browser.channel && headless === settings.browser.headless && quiet === settings.ui.quiet) {
+    return settings
+  }
+  return {
+    ...settings,
+    browser: { ...settings.browser, channel, headless },
+    ui: { ...settings.ui, quiet },
+  }
+}
+
 /** Coerce one positive-integer field, keeping the default when invalid. */
 function count(value: unknown, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
@@ -367,6 +486,7 @@ export function resolveSettings(raw: unknown, warn?: (message: string) => void):
     browser: {
       channel: resolveChannel(browser?.channel, warn),
       headless: resolveHeadless(browser?.headless, warn),
+      profiles: resolveProfiles(browser?.profiles, warn),
     },
     credentials: {
       // `gate` returns false for anything present-and-not-a-boolean, so an unreadable section
@@ -423,19 +543,41 @@ export class SettingsStore {
 
   /**
    * @param file - settings file path (defaults beside the browser profile).
+   * @param log - where a discarded value is reported.
+   * @param profile - the booted profile name; its overrides are folded into {@link get}.
    */
-  constructor(private readonly file: string = settingsPath(), private readonly log?: (message: string) => void) {}
+  constructor(
+    private readonly file: string = settingsPath(),
+    private readonly log?: (message: string) => void,
+    private readonly profile?: string,
+  ) {}
 
   /** Path this store reads and writes. */
   path(): string {
     return this.file
   }
 
+  /** The profile whose overrides {@link get} folds in, if this surface has one. */
+  profileName(): string | undefined {
+    return this.profile
+  }
+
   /**
-   * Current settings, re-read when the file changed on disk.
-   * @returns the resolved settings document.
+   * Current settings, re-read when the file changed on disk, with this profile's overrides applied.
+   * @returns the effective settings document.
    */
   get(): BrowserSettings {
+    return applyProfileSettings(this.stored(), this.profile)
+  }
+
+  /**
+   * The document exactly as stored, before any profile override.
+   *
+   * `update` merges patches into THIS, never into {@link get}: writing the effective values back
+   * would bake one profile's override into the global default and hand it to every other profile.
+   * @returns the resolved document as stored.
+   */
+  private stored(): BrowserSettings {
     let mtimeMs = -1
     try {
       // stat directly: existsSync costs about thirteen times what the stat does, and the
@@ -492,12 +634,19 @@ export class SettingsStore {
 
   /**
    * Merge a partial patch into the stored document and persist it.
+   *
+   * On a surface that knows its profile, a patch that names the carrier (`browser.channel`,
+   * `browser.headless`) or quiet mode (`ui.quiet`) is written to THAT profile's override instead
+   * of the global value. That is what makes the existing controls in the panel mean "how this
+   * profile runs" without a second set of controls, and it is why the panel's writes stop
+   * fighting the other profile's preferences.
    * @param patch - the fields to change (unknown keys are ignored).
-   * @returns the settings after the merge.
+   * @returns the effective settings after the merge.
    */
   update(patch: unknown): BrowserSettings {
-    const current = this.get()
-    const merged = resolveSettings(deepMerge(current as unknown as Record<string, unknown>, patch), m => this.log?.(m))
+    const current = this.stored()
+    const routed = this.routeToProfile(patch)
+    const merged = resolveSettings(mergeDocument(current as unknown as Record<string, unknown>, routed), m => this.log?.(m))
     try {
       mkdirSync(dirname(this.file), { recursive: true })
       writeFileAtomic(this.file, `${JSON.stringify(merged, null, 2)}\n`)
@@ -513,7 +662,54 @@ export class SettingsStore {
       throw new Error(`dsh-builtin-browser: settings could not be saved: ${error instanceof Error ? error.message : String(error)}`)
 
     }
-    return merged
+    return applyProfileSettings(merged, this.profile)
+  }
+
+  /**
+   * Move this profile's carrier-facing fields from a top-level patch into its override entry.
+   *
+   * Left alone when the surface has no profile: an unnamed surface keeps the global behaviour, so
+   * a hand-written patch (`{ browser: { channel } }`) still writes what it says.
+   * @param patch - the requested patch.
+   * @returns the patch to store.
+   */
+  private routeToProfile(patch: unknown): Record<string, unknown> {
+    if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return {}
+    const source = patch as Record<string, unknown>
+    const profile = this.profile
+    if (profile === undefined || profile === '') return source
+    const out: Record<string, unknown> = { ...source }
+    const carrier: Record<string, unknown> = {}
+    const browserSection = out.browser
+    if (isPlainObject(browserSection)) {
+      if (browserSection.channel !== undefined) carrier.channel = browserSection.channel
+      if (browserSection.headless !== undefined) carrier.headless = browserSection.headless
+    }
+    const uiSection = out.ui
+    if (isPlainObject(uiSection) && uiSection.quiet !== undefined) carrier.quiet = uiSection.quiet
+    if (Object.keys(carrier).length === 0) return out
+    let remainingBrowser: Record<string, unknown> = {}
+    if (isPlainObject(browserSection)) {
+      remainingBrowser = { ...browserSection }
+      delete remainingBrowser.channel
+      delete remainingBrowser.headless
+    }
+    if (isPlainObject(uiSection)) {
+      const remainingUi = { ...uiSection }
+      delete remainingUi.quiet
+      if (Object.keys(remainingUi).length === 0) delete out.ui
+      else out.ui = remainingUi
+    }
+    const profiles = isPlainObject(remainingBrowser.profiles) ? remainingBrowser.profiles : {}
+    const existing = profiles[profile]
+    out.browser = {
+      ...remainingBrowser,
+      profiles: {
+        ...profiles,
+        [profile]: { ...isPlainObject(existing) ? existing : {}, ...carrier },
+      },
+    }
+    return out
   }
 }
 
@@ -553,14 +749,53 @@ export function writeFileAtomic(file: string, contents: string): void {
   }
 }
 
-/** One-level-deep merge over the settings sections (patch wins). */
-function deepMerge(base: Record<string, unknown>, patch: unknown): Record<string, unknown> {
-  if (typeof patch !== 'object' || patch === null) return base
+/** Whether a value is a plain (non-array) object, the only shape the settings document nests. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Merge a patch over the stored document, one section deep as before — except `browser.profiles`,
+ * which merges per profile and per field.
+ *
+ * The depth matters: replacing the whole `profiles` map on every write would erase every other
+ * profile's override the first time one of them is edited from a panel.
+ * @param base - the stored document.
+ * @param patch - the patch to merge in.
+ * @returns the merged document, still unresolved.
+ */
+function mergeDocument(base: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = { ...base }
-  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(patch)) {
     const existing = result[key]
-    if (typeof value === 'object' && value !== null && typeof existing === 'object' && existing !== null) {
-      result[key] = { ...existing as Record<string, unknown>, ...value as Record<string, unknown> }
+    if (isPlainObject(value) && isPlainObject(existing)) {
+      const merged: Record<string, unknown> = { ...existing, ...value }
+      if (key === 'browser') {
+        const baseProfiles = isPlainObject(existing.profiles) ? existing.profiles : {}
+        const patchProfiles = isPlainObject(value.profiles) ? value.profiles : {}
+        const profiles: Record<string, unknown> = { ...baseProfiles }
+        for (const [name, entry] of Object.entries(patchProfiles)) {
+          if (entry === null || entry === undefined) {
+            delete profiles[name]
+            continue
+          }
+          if (!isPlainObject(entry)) {
+            profiles[name] = entry
+            continue
+          }
+          const target = isPlainObject(profiles[name]) ? { ...(profiles[name] as Record<string, unknown>) } : {}
+          // A null field is how the panel says "stop overriding this": storing it would make the
+          // value unreadable and keep warning on every read.
+          for (const [field, value] of Object.entries(entry)) {
+            if (value === null || value === undefined) delete target[field]
+            else target[field] = value
+          }
+          if (Object.keys(target).length === 0) delete profiles[name]
+          else profiles[name] = target
+        }
+        merged.profiles = profiles
+      }
+      result[key] = merged
     } else {
       result[key] = value
     }

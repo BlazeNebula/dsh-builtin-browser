@@ -19,7 +19,7 @@ import { provisionElectronInBackground, provisionSnapshot, hasElectronRuntime } 
 import type { ElectronBrowserViewHost } from './provider.js'
 import type { CarrierLossReason } from '../browser/types.js'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, renameSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { dshHome } from './paths.js'
@@ -113,8 +113,34 @@ function readSessionId(ctx: unknown): string | undefined {
   }
 }
 
+/**
+ * Which profile is this process running?
+ *
+ * DSH hands the booted profile name to its plugins as `profileContext`, and the name (not the
+ * directory) is what a settings override is keyed by: it stays stable when the home moves and it
+ * matches what the user picks on the command line (`--profile web`).
+ * @param ctx - the plugin context.
+ * @returns the profile name, or undefined on a surface that provides none.
+ */
+function readProfileName(ctx: unknown): string | undefined {
+  try {
+    const surface = ctx as { get?: (name: string) => unknown }
+    if (typeof surface.get !== 'function') return undefined
+    const profile = surface.get('profileContext') as { name?: unknown } | undefined
+    const name = profile?.name
+    return typeof name === 'string' && name.trim() !== '' ? name.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
+  // Which profile is this process running? It is the key the carrier-facing settings are stored
+  // under, so several profiles sharing one `$DSH_HOME` can carry different browsers instead of
+  // overwriting each other's single `browser.channel`.
+  const profileName = readProfileName(ctx)
+
   // Which session is this process serving?
   //
   // The desktop shell keeps ONE sidebar per conversation — measured: two `[class*=_tabStrip]`
@@ -133,7 +159,13 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // provider reads it live, and both ends agree on the same file. The logger is passed so a
   // discarded value (a mistyped channel, most of all) is reported instead of being silently
   // replaced by the default — "my setting did nothing" and "I misspelled it" must not look alike.
-  const settings = new SettingsStore(undefined, message => ctx.logger?.warn?.(message))
+  const settings = new SettingsStore(undefined, message => ctx.logger?.warn?.(message), profileName)
+  if (profileName !== undefined) {
+    ctx.logger?.info?.(
+      `dsh-builtin-browser: profile "${profileName}" runs with browser.channel `
+      + `"${settings.get().browser.channel}"`,
+    )
+  }
 
   const providerConfig = {
     httpOnly: config.httpOnly,
@@ -722,6 +754,25 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
 const SETTINGS_ROUTE = '/dsh-builtin-browser/settings'
 
 /**
+ * The profiles installed in this `$DSH_HOME`.
+ *
+ * Read from the directory the loader itself reads, so the panel can offer every profile without
+ * asking the user to remember names: a per-profile setting is only useful if you can see which
+ * profiles exist.
+ * @returns profile directory names, sorted; empty when the directory is unreadable.
+ */
+function knownProfiles(): string[] {
+  try {
+    return readdirSync(join(dshHome(), 'profiles'), { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+/**
  * The directory under the DSH home that holds this plugin's browser profile.
  *
  * Named once, because every consumer of it must agree: `settingsPath()` and the history
@@ -851,7 +902,15 @@ async function handleSettingsRequest(
     return
   }
   if (method === 'GET') {
-    json(200, { ok: true, settings: settings.get(), path: settings.path() })
+    json(200, {
+      ok: true,
+      settings: settings.get(),
+      path: settings.path(),
+      // The panel has to say WHICH profile it is editing and which overrides exist, or a
+      // per-profile switch reads as a global one that silently does nothing.
+      profile: settings.profileName(),
+      profiles: knownProfiles(),
+    })
     return
   }
   if (method !== 'PUT' && method !== 'POST') {

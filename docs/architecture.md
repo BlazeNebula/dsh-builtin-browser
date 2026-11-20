@@ -157,3 +157,11 @@ node desktop-bridge/install.mjs --revert   # 回滚
 `browser.channel` 在设置里改动后**当场生效**,不需要重启 DSH:设置路由在写入改变 channel 时重跑一次载体选择,换掉旧载体并释放它。响应里带 `carrierRechosen: true` 与"只存了"区分开。
 
 **代价明说**:换载体意味着**关掉旧载体上开着的页面** —— 换浏览器本来就是这个意思。如果你改设置时正好开着东西,那些页面会消失;这是刻意的(比留一个看不见的载体继续活着强,否则会有两个浏览器实例、两套登录态,而用户只知道自己改了一个设置)。
+
+### 载体按 profile 分开
+
+同一台机器上的多个 profile 共用一个 `DSH_HOME`,因此共用一份 `settings.json`;而插件每次读设置都会 stat 文件并在改动后重选载体,所以一个全局的 `browser.channel` 会让桌面端与 `dsh web` 互相覆盖 —— 桌面端要侧栏给人看,`web` 端要自己的浏览器跑后台任务,这两件事没法并存。
+
+现在载体面向前三个开关可以按 profile 命名:`browser.profiles.<profile>` 下的 `channel`、`headless`、`quiet`。解析规则只有一条:**覆盖项只改它写明的字段,没写的跟随文档里的全局值**;空条目会被丢弃,写错的字段会被告警并忽略(而不是悄悄钉成默认值)。生效点在读取处 —— `SettingsStore.get()` 折叠覆盖后再交给载体选择和 provider,所以下游代码不需要知道 profile 的存在。
+
+同一个设置在面板里的写入方向也随 profile 走:有 profile 的宿主上,面板改「默认浏览器」「窗口模式」「安静模式」写的是**当前 profile 的覆盖项**(`browser.profiles.<profile>`),全局值保持不变;没有 profile 的宿主(某些嵌入式组合)行为不变,仍写全局值。清空一个覆盖项用 `null`,存成 `null` 会让它每次读取都告警。

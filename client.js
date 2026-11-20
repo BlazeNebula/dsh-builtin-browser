@@ -99,6 +99,14 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "browser.chrome": "本机 Chrome",
     "browser.edge": "本机 Edge",
     "browser.auto": "自动",
+    "profiles.title": "按 profile 分配载体",
+    "profiles.hint": "同一个 profile 永远用同一个载体；这里设置的值优先于上面的「默认浏览器」。当前运行的 profile 是 {profile}。",
+    "profiles.inherit": "跟随默认",
+    "profiles.quiet.inherit": "跟随默认",
+    "profiles.quiet.on": "安静模式开",
+    "profiles.quiet.off": "安静模式关",
+    "profiles.current": "当前 profile",
+    "profiles.empty": "没有找到任何 profile。",
     "actions.title": "Agent 权限",
     "actions.allowExecute": "允许在页面里执行脚本",
     "actions.allowDownload": "允许下载文件到磁盘",
@@ -231,6 +239,14 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     "browser.chrome": "Installed Chrome",
     "browser.edge": "Installed Edge",
     "browser.auto": "Automatic",
+    "profiles.title": "Carrier per profile",
+    "profiles.hint": "A profile keeps one carrier. These values outrank \"Default browser\" above. The profile running now is {profile}.",
+    "profiles.inherit": "Follow the default",
+    "profiles.quiet.inherit": "Follow the default",
+    "profiles.quiet.on": "Quiet mode on",
+    "profiles.quiet.off": "Quiet mode off",
+    "profiles.current": "Current profile",
+    "profiles.empty": "No profiles were found.",
     "actions.title": "Agent permissions",
     "actions.allowExecute": "Run scripts in the page",
     "actions.allowDownload": "Download files to disk",
@@ -1074,7 +1090,7 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     useLocaleVersion()
     const t = translate
     const [rawSettings, setSettings] = useState(null)
-    const [meta, setMeta] = useState({ path: "" })
+    const [meta, setMeta] = useState({ path: "", profile: "", profiles: [] })
     const [error, setError] = useState("")
     const [busy, setBusy] = useState(false)
     const [saved, setSaved] = useState(false)
@@ -1087,7 +1103,13 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
       callSettings().then(data => {
         if (!alive.current) return
         setSettings(data.settings)
-        setMeta({ path: data.path || "" })
+        setMeta({
+          path: data.path || "",
+          // Which profile this panel is editing, and which ones exist: a per-profile switch is
+          // only legible when the panel says whose it is.
+          profile: typeof data.profile === "string" ? data.profile : "",
+          profiles: Array.isArray(data.profiles) ? data.profiles : [],
+        })
       }).catch(failure => { if (alive.current) setError(String(failure && failure.message ? failure.message : failure)) })
     }, [])
 
@@ -1161,11 +1183,60 @@ window.__ModuleLoader__.load({ id: "dsh-builtin-browser", factory: (require) => 
     ])
     const systemBrowser = ["chrome", "edge", "auto"].includes(settings.browser.channel)
 
+    // Per-profile carrier table. The rows come from the profiles installed under $DSH_HOME plus
+    // any profile that already carries an override, so a name typed by hand is never lost.
+    const profileNames = Array.from(new Set([
+      ...meta.profiles,
+      ...Object.keys(settings.browser.profiles ?? {}),
+    ])).sort()
+    const overrideOf = name => (settings.browser.profiles ?? {})[name] ?? {}
+    const patchProfile = (name, field) => patch({ browser: { profiles: { [name]: field } } })
+    const quietValue = name => {
+      const quiet = overrideOf(name).quiet
+      return quiet === undefined ? "" : quiet ? "on" : "off"
+    }
+    const profilesSection = section("profiles.title", [
+      h("p", { key: "hint", style: styles.hint }, t("profiles.hint").replace("{profile}", meta.profile === "" ? "-" : meta.profile)),
+      profileNames.length === 0
+        ? h("p", { key: "empty", style: styles.hint }, t("profiles.empty"))
+        : h("div", { key: "rows", style: { display: "grid", gap: "8px" } }, profileNames.map(name => h("div", {
+          key: name,
+          className: "dsh-bb-row",
+          style: styles.row,
+        }, [
+          h("span", { key: "text", style: styles.label }, [
+            h("span", { key: "label" }, name),
+            name === meta.profile ? h("span", { key: "current", style: styles.hint }, t("profiles.current")) : null,
+          ]),
+          h(Dropdown, {
+            key: "carrier",
+            label: `${name} — ${t("browser.channel")}`,
+            value: overrideOf(name).channel ?? "",
+            options: [{ value: "", label: t("profiles.inherit") }, ...options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"])],
+            disabled: busy,
+            onChange: value => patchProfile(name, { channel: value === "" ? null : value }),
+          }),
+          h(Dropdown, {
+            key: "quiet",
+            label: `${name} — ${t("ui.quiet")}`,
+            value: quietValue(name),
+            options: [
+              { value: "", label: t("profiles.quiet.inherit") },
+              { value: "on", label: t("profiles.quiet.on") },
+              { value: "off", label: t("profiles.quiet.off") },
+            ],
+            disabled: busy,
+            onChange: value => patchProfile(name, { quiet: value === "" ? null : value === "on" }),
+          }),
+        ]))),
+    ])
+
     return h("div", { style: styles.wrap, className: "dsh-bb-settings" }, [
       selector("browser.channel", settings.browser.channel,
         options("browser.", ["bundled", "sidebar", "auto", "chrome", "edge"]),
         channel => patch({ browser: { channel } })),
       h(Readiness, { key: "readiness", channel: settings.browser.channel }),
+      profilesSection,
       section("ui.title", [
         toggle("ui", "quiet", "ui.quiet", "ui.quiet.hint"),
         toggle("ui", "autoExpandOnce"),

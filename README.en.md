@@ -69,6 +69,8 @@ The browser window appears with the first call, and you can operate in it yourse
 | Local Chrome / Edge | Launches the installed browser with a dedicated plugin profile. |
 | Automatic | Chooses based on the available local browsers and desktop sidebar. |
 
+Profiles sharing one `DSH_HOME` can name their own carrier (see below): the desktop profile keeps the DSH sidebar while a background `web` profile runs its own Edge quietly, and neither overwrites the other.
+
 Windows Desktop **Settings → Browser** provides installation, repair, and reinstallation with automatic restart. **Diagnostics** includes uninstall and restart, plus an external-terminal command. Progress and results survive the restart, and successful installation requires a verified connection to the new process. For terminal maintenance, exit Desktop normally and run this from the plugin directory:
 
 ~~~sh
@@ -80,6 +82,7 @@ Preparation feedback appears immediately. While Desktop is closed, a separate pr
 ## Browser settings
 
 - **Environment check** reports detected Chrome / Edge, the bundled runtime, and sidebar bridge availability. Automatic mode identifies the selected carrier; **Diagnostics** includes the executable path.
+- **Carrier per profile** gives each profile its own carrier and quiet mode; anything left unset follows "Default browser" and the quiet-mode switch. The file keeps this in `browser.profiles.<profile>`. Changing "Default browser" or quiet mode inside a profile's own panel writes that profile's override, never another profile's — which is how Desktop and `dsh web` can keep different browsers under one `DSH_HOME`.
 - **Quiet mode** preserves the operating system's foreground window and pointer position. New browser windows appear in the background, and minimized bundled browser windows stay minimized. With DSH sidebar selected, opening a URL reveals the target conversation's sidebar page; explicit tab switching selects the corresponding native tab.
 - **Presentation** controls sidebar expansion, closing the browser with the session, the agent cursor, and remote viewing.
 - **Agent permissions** controls page scripts, downloads, and reading or writing sign-in state.
